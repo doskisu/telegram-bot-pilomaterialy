@@ -24,8 +24,10 @@ def create_photo_request_button():
 # Кнопки связи с менеджером
 def create_contact_buttons():
     buttons = [
-        [InlineKeyboardButton(text="📞 Позвонить менеджеру", url="tel:+79917870066")],
+        [InlineKeyboardButton(text="📞 Позвонить менеджеру", url="tg://call?phone_number=+79917870066")],
         [InlineKeyboardButton(text="💬 Написать менеджеру", url=f"https://t.me/{MANAGER_TELEGRAM_ID}")] 
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons) 
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
