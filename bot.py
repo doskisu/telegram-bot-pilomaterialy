@@ -1,121 +1,140 @@
-import os
-import logging
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram import Bot, Dispatcher, types, executor
+from aiogram.types import (
+    ReplyKeyboardMarkup, 
+    KeyboardButton,
+    InlineKeyboardMarkup, 
+    InlineKeyboardButton
+)
+from aiogram.contrib.fsm_storage.memory import MemoryStorage
+from aiogram.dispatcher import FSMContext
+from aiogram.dispatcher.filters.state import State, StatesGroup
 
-# Логирование
-logging.basicConfig(level=logging.INFO)
+bot = Bot(token="ВАШ_ТОКЕН")
+storage = MemoryStorage()
+dp = Dispatcher(bot, storage=storage)
 
-# Получаем токен из переменной окружения
-API_TOKEN = os.getenv('BOT_TOKEN')
-MANAGER_TELEGRAM_ID = 'raszd189'  # Telegram-никнейм менеджера
+# ===== СОСТОЯНИЯ ДЛЯ КАЛЬКУЛЯТОРА =====
+class CalculatorStates(StatesGroup):
+    waiting_material = State()
+    waiting_size = State()
+    waiting_quantity = State()
 
-# Инициализируем бота и диспетчера
-bot = Bot(token=API_TOKEN)
-dp = Dispatcher()
+# ===== ДАННЫЕ ДЛЯ РАСЧЕТОВ =====
+MATERIALS = {
+    "board1": {"name": "Доска 1 сорт 6м", "sizes": ["25x100", "25x150", "40x100", "40x150", "40x200", "50x100", "50x150", "50x200"]},
+    "board2": {"name": "Доска 2 сорт", "sizes": ["25x100x3м", "25x100x6м", "25x150x3м", "25x150x6м"]},
+    "bar": {"name": "Брусок 50x50x3м", "size": "50x50x3000"},
+    "lath": {"name": "Рейка 25x50x3м", "size": "25x50x3000"}
+}
 
-# Кнопки для бота
-def create_buttons():
-    buttons = [
-        [InlineKeyboardButton(text="📞 Связаться с менеджером", url=f"https://t.me/{MANAGER_TELEGRAM_ID}")], 
-        [InlineKeyboardButton(text="📷 Запросить фото", callback_data="request_photo")]
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
+# Коэффициенты перевода (штук в м³)
+VOLUME_COEFFICIENTS = {
+    "25x100x6000": 0.015,   # 1 м³ = 66.6 шт
+    "25x150x6000": 0.0225,  # 1 м³ = 44.4 шт
+    "40x100x6000": 0.024,   # 1 м³ = 41.6 шт
+    "40x150x6000": 0.036,   # 1 м³ = 27.7 шт
+    "40x200x6000": 0.048,   # 1 м³ = 20.8 шт
+    "50x100x6000": 0.03,    # 1 м³ = 33.3 шт
+    "50x150x6000": 0.045,   # 1 м³ = 22.2 шт
+    "50x200x6000": 0.06,    # 1 м³ = 16.6 шт
+    "25x100x3000": 0.0075,  # 1 м³ = 133.3 шт
+    "25x150x3000": 0.01125, # 1 м³ = 88.8 шт
+    "50x50x3000": 0.0075,   # 1 м³ = 133.3 шт (брусок)
+    "25x50x3000": 0.00375   # 1 м³ = 266.6 шт (рейка)
+}
 
-# Команда /start
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    await message.answer(
-        "Привет! Я бот для заказа пиломатериалов. Вот что я могу:\n\n"
-        "- Ответить на вопросы о продукции\n"
-        "- Предоставить контакты менеджера\n"
-        "- Показать фото продукции",
-        reply_markup=create_buttons()
+# ===== ОСНОВНОЕ МЕНЮ =====
+def main_menu_keyboard():
+    return ReplyKeyboardMarkup(
+        resize_keyboard=True,
+        keyboard=[
+            [KeyboardButton(text="Калькулятор объемов 📐")],
+            [KeyboardButton(text="Связаться с менеджером 📞"), 
+             KeyboardButton(text="Запросить фото 📷")]
+        ]
     )
 
-# Обработчик нажатий на кнопки
-@dp.callback_query()
-async def handle_callback(callback_query: types.CallbackQuery):
-    if callback_query.data == "request_photo":
-        await callback_query.message.answer(
-            "Чтобы получить фотографии продукции, свяжитесь с нашим менеджером: "
-            f"[https://t.me/{MANAGER_TELEGRAM_ID}](https://t.me/{MANAGER_TELEGRAM_ID})", 
-            parse_mode="Markdown"
-        )
+# ===== ЗАПУСК КАЛЬКУЛЯТОРА =====
+@dp.message_handler(lambda message: message.text == "Калькулятор объемов 📐")
+async def start_calculator(message: types.Message):
+    keyboard = InlineKeyboardMarkup(row_width=2)
+    for key, mat in MATERIALS.items():
+        keyboard.add(InlineKeyboardButton(mat["name"], callback_data=f"calc_{key}"))
+    
+    await message.answer("Выберите материал:", reply_markup=keyboard)
+    await CalculatorStates.waiting_material.set()
 
-# Обработчик текстовых сообщений
-@dp.message()
-async def handle_text(message: types.Message):
-    user_text = message.text.lower()
+# ===== ВЫБОР МАТЕРИАЛА =====
+@dp.callback_query_handler(lambda c: c.data.startswith('calc_'), state=CalculatorStates.waiting_material)
+async def select_material(callback_query: types.CallbackQuery, state: FSMContext):
+    material_key = callback_query.data.split('_')[1]
+    await state.update_data(material=material_key)
+    
+    mat_data = MATERIALS[material_key]
+    
+    if "sizes" in mat_data:  # Для досок с выбором размера
+        keyboard = InlineKeyboardMarkup(row_width=2)
+        for size in mat_data["sizes"]:
+            keyboard.add(InlineKeyboardButton(size, callback_data=f"size_{size}"))
+        await bot.send_message(callback_query.from_user.id, "Выберите размер:", reply_markup=keyboard)
+        await CalculatorStates.next()
+    else:  # Для бруска/рейки (фиксированный размер)
+        await bot.send_message(callback_query.from_user.id, f"Введите количество штук ({mat_data['name']}):")
+        await state.update_data(size=mat_data["size"])
+        await CalculatorStates.waiting_quantity.set()
 
-    # База знаний: вопросы и ответы
-    faq = {
-        "какой тип|вид|что предлагаете": (
-            "Мы предлагаем обрезные хвойные пиломатериалы (сосна, ель) естественной влажности стандартных размеров. "
-            "Также производим брусок 50×50×3 м и рейку 25×50×3 м. "
-            "Есть доска 2-го сорта размерами 25×100 и 25×150 (длиной 3 или 6 метров)."
-        ),
-        "сорта|какие сорта": (
-            "Мы производим пиломатериалы 1-го и 2-го сортов. "
-            "Доска 2-го сорта имеет хорошую геометрию, но содержит больше обзола, из-за чего стоит дешевле."
-        ),
-        "минимальный объем|сколько минимум заказать": (
-            "Минимальный объем заказа:\n"
-            "- Для стандартных пиломатериалов: **40 кубов**.\n"
-            "- Для трехмеровых пиломатериалов: **33 куба**."
-        ),
-        "оплата|как платить": (
-            "Мы работаем как по наличному, так и по безналичному расчету. "
-            "Оплата возможна с НДС и без НДС. Также принимаем оплату наличными."
-        ),
-        "где находится|производство|ваш завод": (
-            "Наши производства расположены в Тверской и Владимирской областях."
-        ),
-        "объем производства|сколько выпускаете": (
-            "Объем производства составляет более 5000 тыс. кубов в месяц."
-        ),
-        "сроки доставки|когда доставят": (
-            "Сроки доставки согласовываются индивидуально. При необходимости можем организовать срочную доставку."
-        ),
-        "нестандартные размеры|можно ли заказать": (
-            "Мы производим пиломатериалы стандартных размеров. "
-            "При покупке трехмеровых пиломатериалов минимальный объем заказа — 33 куба."
-        ),
-        "что такое доска 2-го сорта|доска 2 сорта": (
-            "Доска 2-го сорта имеет хорошую геометрию, но содержит немного больше обзола, из-за чего стоит дешевле. "
-            "Размеры: 25×100 мм и 25×150 мм, длина: 3 или 6 метров. Подходит для черновых работ."
-        ),
-        "официально|через фгис": (
-            "Да, мы работаем официально через ФГИС (Федеральную государственную информационную систему)."
-        ),
-        "связаться|менеджер|срочная консультация": (
-            "Если вам нужна срочная консультация, свяжитесь с нашим менеджером: "
-            f"[https://t.me/{MANAGER_TELEGRAM_ID}](https://t.me/{MANAGER_TELEGRAM_ID}).  "
-            "Либо оставьте свой номер телефона, и мы свяжемся с вами."
-        )
-    }
+# ===== ВЫБОР РАЗМЕРА (ТОЛЬКО ДЛЯ ДОСОК) =====
+@dp.callback_query_handler(lambda c: c.data.startswith('size_'), state=CalculatorStates.waiting_size)
+async def select_size(callback_query: types.CallbackQuery, state: FSMContext):
+    size = callback_query.data.split('_')[1]
+    await state.update_data(size=size)
+    await bot.send_message(callback_query.from_user.id, "Введите количество штук:")
+    await CalculatorStates.next()
 
-    # Поиск ответа в базе знаний
-    for keywords, answer in faq.items():
-        if any(keyword in user_text for keyword in keywords.split('|')):
-            await message.answer(answer, reply_markup=create_buttons())
-            return
+# ===== РАСЧЕТ ОБЪЕМА =====
+@dp.message_handler(state=CalculatorStates.waiting_quantity)
+async def calculate_volume(message: types.Message, state: FSMContext):
+    try:
+        quantity = int(message.text)
+        if quantity <= 0:
+            raise ValueError
+            
+        data = await state.get_data()
+        size_key = data["size"].replace("x", "").lower()
+        
+        # Находим коэффициент по ключу размера
+        volume_coeff = next((v for k, v in VOLUME_COEFFICIENTS.items() 
+                            if size_key in k.replace("x", "").lower()), None)
+        
+        if volume_coeff:
+            total_volume = round(quantity * volume_coeff, 2)
+            material_name = MATERIALS[data["material"]]["name"]
+            
+            # Расчет стоимости доставки (пример: 1500 руб/м³)
+            delivery_cost = total_volume * 1500
+            
+            response = (
+                f"📐 Результаты расчета:\n"
+                f"• Материал: {material_name} ({data['size']})\n"
+                f"• Количество: {quantity} шт\n"
+                f"• Общий объем: {total_volume} м³\n"
+                f"• Примерная стоимость доставки: {delivery_cost:.0f} руб\n\n"
+                f"*Для точного расчета заказа свяжитесь с менеджером"
+            )
+            
+            await message.answer(response, reply_markup=main_menu_keyboard())
+        else:
+            await message.answer("Ошибка: размер не найден. Попробуйте снова.")
+            
+    except ValueError:
+        await message.answer("Пожалуйста, введите целое число больше 0!")
+        return
+    
+    await state.finish()
 
-    # Если ничего не найдено
-    await message.answer(
-        "Я не понял ваш вопрос. Вот что я могу:\n\n"
-        "- Рассказать о типах пиломатериалов\n"
-        "- Сообщить минимальный объем заказа\n"
-        "- Предоставить контакты менеджера\n\n"
-        "Напишите, например: 'Минимальный объем заказа' или 'Какие сорта доступны'.",
-        reply_markup=create_buttons()
-    )
+# ===== ОСТАЛЬНАЯ ЛОГИКА БОТА (из предыдущего кода) =====
+# ... [Обработчики для связи с менеджером, фото и т.д.] ...
 
-# Запуск бота
-async def main():
-    await dp.start_polling(bot)
-
+# ===== ЗАПУСК =====
 if __name__ == '__main__':
-    import asyncio
-    asyncio.run(main())
+    executor.start_polling(dp, skip_updates=True)
