@@ -3,7 +3,7 @@ import logging
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.filters import Command
-from aiogram import CallbackQuery
+from aiogram. types import CallbackQuery
 
 # Логирование
 logging.basicConfig(level=logging.INFO)
